@@ -119,6 +119,12 @@ private:
     pos_.x() = msg->pose.pose.position.x;
     pos_.y() = msg->pose.pose.position.y;
     pos_.z() = msg->pose.pose.position.z;
+    if (!msg->child_frame_id.empty()) {
+      lidar_frame_id_ = msg->child_frame_id;
+      if (!lidar_frame_id_.empty() && lidar_frame_id_.front() == '/') {
+        lidar_frame_id_.erase(0, 1);
+      }
+    }
 
     auto now = this->now();
     if ((now - last_lidar_pub_time_).seconds() >= lidar_pub_interval_) {
@@ -135,7 +141,9 @@ private:
     sensor_msgs::msg::PointCloud2 output;
     pcl::toROSMsg(lidar_points, output);
     output.header.stamp = stamp;
-    output.header.frame_id = "odom";
+    // renderLidarPointcloud returns points in the LiDAR/body frame.
+    // Use odom child_frame_id from the latest odometry message.
+    output.header.frame_id = lidar_frame_id_;
     point_cloud_pub_->publish(output);
   }
 
@@ -147,6 +155,7 @@ private:
 
   Eigen::Quaternionf quat_{Eigen::Quaternionf::Identity()};
   Eigen::Vector3f pos_{Eigen::Vector3f::Zero()};
+  std::string lidar_frame_id_{"body"};
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_pub_;
