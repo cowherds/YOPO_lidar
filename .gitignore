@@ -33,4 +33,9 @@ YOPO/saved/*
 dataset/
 yopo_sim/
 
+*.pyc
+*.log
+__pycache__/
+
+
 !YOPO/saved/YOPO_1/

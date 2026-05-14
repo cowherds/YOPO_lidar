@@ -1,11 +1,14 @@
 #include <chrono>
 #include <iostream>
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <pcl/common/common.h>
 #include <pcl/common/eigen.h>
+#include <pcl/common/transforms.h>
 #include <pcl/io/ply_io.h>
 #include <pcl/point_cloud.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -14,6 +17,8 @@
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 
 #include "sensor_simulator.cuh"
 #include "maps.hpp"
@@ -53,6 +58,34 @@ public:
     const std::string ply_file = config["ply_file"].as<std::string>();
     const std::string odom_topic = config["odom_topic"].as<std::string>();
     const std::string lidar_topic = config["lidar_topic"].as<std::string>();
+    if (config["world_frame_id"]) {
+      const std::string configured_world_frame = normalizeFrameId(config["world_frame_id"].as<std::string>());
+      if (!configured_world_frame.empty()) {
+        world_frame_id_ = configured_world_frame;
+        follow_odom_world_frame_id_ = false;
+      }
+    }
+    if (config["lidar_frame_id"]) {
+      const std::string configured_lidar_frame = normalizeFrameId(config["lidar_frame_id"].as<std::string>());
+      if (!configured_lidar_frame.empty()) {
+        if (isGlobalFrame(configured_lidar_frame)) {
+          RCLCPP_WARN(
+              this->get_logger(),
+              "Configured lidar_frame_id '%s' is a global frame, ignored. Keep using odom child_frame_id / default '%s'.",
+              configured_lidar_frame.c_str(), lidar_frame_id_.c_str());
+        } else {
+          lidar_frame_id_ = configured_lidar_frame;
+          follow_odom_lidar_frame_id_ = false;
+        }
+      }
+    }
+    if (config["publish_odom_tf"]) {
+      publish_odom_tf_ = config["publish_odom_tf"].as<bool>();
+    }
+    lidar_world_topic_ = lidar_topic + "_world";
+    if (config["lidar_world_topic"]) {
+      lidar_world_topic_ = config["lidar_world_topic"].as<std::string>();
+    }
 
     const bool use_random_map = config["random_map"].as<bool>();
     float resolution = config["resolution"].as<float>();
@@ -92,6 +125,8 @@ public:
     grid_map_ = std::make_unique<GridMap>(cloud, resolution, occupy_threshold);
 
     point_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(lidar_topic, 1);
+    point_cloud_world_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(lidar_world_topic_, 1);
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     using std::placeholders::_1;
     odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
         odom_topic, 20, std::bind(&SensorSimulatorRos2::odomCallback, this, _1));
@@ -103,6 +138,23 @@ public:
   }
 
 private:
+  static std::string normalizeFrameId(const std::string &frame) {
+    std::string cleaned = frame;
+    while (!cleaned.empty() && cleaned.front() == '/') {
+      cleaned.erase(0, 1);
+    }
+    return cleaned;
+  }
+
+  static bool isGlobalFrame(const std::string &frame) {
+    const std::string frame_lower = [&frame]() {
+      std::string out = frame;
+      std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return out;
+    }();
+    return frame_lower == "world" || frame_lower == "map" || frame_lower == "odom";
+  }
+
   void timerMapCallback() {
     if (pcl_pub_->get_subscription_count() > 0) {
       map_msg_.header.stamp = this->now();
@@ -119,12 +171,26 @@ private:
     pos_.x() = msg->pose.pose.position.x;
     pos_.y() = msg->pose.pose.position.y;
     pos_.z() = msg->pose.pose.position.z;
-    if (!msg->child_frame_id.empty()) {
-      lidar_frame_id_ = msg->child_frame_id;
-      if (!lidar_frame_id_.empty() && lidar_frame_id_.front() == '/') {
-        lidar_frame_id_.erase(0, 1);
+    if (!msg->child_frame_id.empty() && follow_odom_lidar_frame_id_) {
+      const std::string child_frame = normalizeFrameId(msg->child_frame_id);
+      if (!child_frame.empty()) {
+        if (isGlobalFrame(child_frame)) {
+          RCLCPP_WARN_THROTTLE(
+              this->get_logger(), *this->get_clock(), 5000,
+              "Ignoring odom child_frame_id '%s' for LiDAR because it is a global frame.",
+              child_frame.c_str());
+        } else {
+          lidar_frame_id_ = child_frame;
+        }
       }
     }
+    if (!msg->header.frame_id.empty() && follow_odom_world_frame_id_) {
+      const std::string world_frame = normalizeFrameId(msg->header.frame_id);
+      if (!world_frame.empty()) {
+        world_frame_id_ = world_frame;
+      }
+    }
+    publishTransform(msg->header.stamp);
 
     auto now = this->now();
     if ((now - last_lidar_pub_time_).seconds() >= lidar_pub_interval_) {
@@ -145,6 +211,39 @@ private:
     // Use odom child_frame_id from the latest odometry message.
     output.header.frame_id = lidar_frame_id_;
     point_cloud_pub_->publish(output);
+
+    if (point_cloud_world_pub_->get_subscription_count() > 0) {
+      pcl::PointCloud<pcl::PointXYZ> lidar_points_world;
+      Eigen::Affine3f transform = Eigen::Affine3f::Identity();
+      transform.translation() = pos_;
+      transform.linear() = quat_.toRotationMatrix();
+      pcl::transformPointCloud(lidar_points, lidar_points_world, transform);
+
+      sensor_msgs::msg::PointCloud2 output_world;
+      pcl::toROSMsg(lidar_points_world, output_world);
+      output_world.header.stamp = stamp;
+      output_world.header.frame_id = world_frame_id_;
+      point_cloud_world_pub_->publish(output_world);
+    }
+  }
+
+  void publishTransform(const builtin_interfaces::msg::Time &stamp) {
+    if (!publish_odom_tf_) {
+      return;
+    }
+
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = stamp;
+    tf.header.frame_id = world_frame_id_;
+    tf.child_frame_id = lidar_frame_id_;
+    tf.transform.translation.x = static_cast<double>(pos_.x());
+    tf.transform.translation.y = static_cast<double>(pos_.y());
+    tf.transform.translation.z = static_cast<double>(pos_.z());
+    tf.transform.rotation.x = static_cast<double>(quat_.x());
+    tf.transform.rotation.y = static_cast<double>(quat_.y());
+    tf.transform.rotation.z = static_cast<double>(quat_.z());
+    tf.transform.rotation.w = static_cast<double>(quat_.w());
+    tf_broadcaster_->sendTransform(tf);
   }
 
 private:
@@ -156,11 +255,18 @@ private:
   Eigen::Quaternionf quat_{Eigen::Quaternionf::Identity()};
   Eigen::Vector3f pos_{Eigen::Vector3f::Zero()};
   std::string lidar_frame_id_{"body"};
+  std::string world_frame_id_{"world"};
+  std::string lidar_world_topic_{"/lidar_points_world"};
+  bool follow_odom_lidar_frame_id_{true};
+  bool follow_odom_world_frame_id_{true};
+  bool publish_odom_tf_{true};
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_world_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pcl_pub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::TimerBase::SharedPtr timer_map_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
   sensor_msgs::msg::PointCloud2 map_msg_;
   rclcpp::Time last_lidar_pub_time_{0, 0, RCL_ROS_TIME};

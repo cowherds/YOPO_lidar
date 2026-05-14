@@ -1,6 +1,13 @@
 # ROS2 LiDAR-only sensor simulator configuration
 odom_topic: "/sim/odom"
 lidar_topic: "/lidar_points"
+lidar_world_topic: "/lidar_points_world"
+world_frame_id: "world"
+# Keep empty to follow odom.child_frame_id automatically.
+# You can set a fixed local frame (e.g. "base_link") if needed.
+lidar_frame_id: ""
+# Publish world->lidar TF from incoming odom as a fallback.
+publish_odom_tf: true
 
 lidar_fps: 10
 

@@ -74,7 +74,7 @@ class YopoNet:
         self.time_interpolation = 0.0
         self.time_visualize = 0.0
         self.count = 0
-        self.sensor_fps = 30
+        self.sensor_fps = max(float(self.config.get("sensor_fps", 10.0)), 1.0)
 
         if self.use_trt:
             self.policy = TRTModule()
@@ -422,6 +422,7 @@ if __name__ == '__main__':
     parser.add_argument('--odom_topic', type=str, default=None)
     parser.add_argument('--lidar_topic', type=str, default=None)
     parser.add_argument('--ctrl_topic', type=str, default=None)
+    parser.add_argument('--sensor_fps', type=float, default=10.0)
     parser.add_argument('--ros_version', type=str, default='ros2', help='must be ros2 (default)')
     parser.add_argument(
         '--sensor_mode',

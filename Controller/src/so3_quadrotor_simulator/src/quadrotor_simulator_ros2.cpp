@@ -241,7 +241,7 @@ private:
     nav_msgs::msg::Odometry odom_msg;
     odom_msg.header.stamp = tnow;
     odom_msg.header.frame_id = "world";
-    odom_msg.child_frame_id = "/" + quad_name_;
+    odom_msg.child_frame_id = quad_name_;
     stateToOdomMsg(quad_.getState(), odom_msg);
     odom_pub_->publish(odom_msg);
 
@@ -254,7 +254,7 @@ private:
     geometry_msgs::msg::TransformStamped tf;
     tf.header.stamp = tnow;
     tf.header.frame_id = "world";
-    tf.child_frame_id = "odom";
+    tf.child_frame_id = odom_msg.child_frame_id;
     tf.transform.translation.x = odom_msg.pose.pose.position.x;
     tf.transform.translation.y = odom_msg.pose.pose.position.y;
     tf.transform.translation.z = odom_msg.pose.pose.position.z;

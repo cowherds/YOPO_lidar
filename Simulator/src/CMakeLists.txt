@@ -15,6 +15,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
@@ -70,6 +71,7 @@ ament_target_dependencies(sensor_simulator
   rclcpp
   nav_msgs
   sensor_msgs
+  tf2_ros
   cv_bridge
   pcl_conversions
 )
